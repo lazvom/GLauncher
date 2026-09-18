@@ -8,3 +8,4 @@ Support for Microsoft authentication
 Easy skin/cape change
 Multiple Instances
 Easy mod loader installation
+and a ui made for users in mind currenctly (WIP) because im waiting for my entra client id to get approved by mojang
