@@ -4,7 +4,7 @@ Installation
 In release there's the portable installation which is a .zip that only needs exraction or the installation with installer which with a .exe installer
 Features
 Easy Mod/Modpack/Resource Pack/Shader installation
-Support for Microsoft/Offline authentication
+Support for Microsoft authentication
 Easy skin/cape change
 Multiple Instances
 Easy mod loader installation
