@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GLauncher — Preview</title>
+  <link rel="stylesheet" href="style.css" />
+  <!-- DEV ONLY: installs a mock pywebview bridge before app.js runs. -->
+  <script src="mock-api.js"></script>
+</head>
+<body>
+  <div id="bg-layer"></div>
+  <div id="bg-scrim"></div>
+
+  <div id="app">
+    <div class="titlebar" id="titlebar">
+      <div class="titlebar-drag native-titlebar-drag" id="titlebar-drag">
+        <span class="titlebar-title">GLauncher</span>
+      </div>
+      <div class="titlebar-controls">
+        <button class="titlebar-btn" id="win-minimize" title="Minimize" data-testid="win-minimize-btn"></button>
+        <button class="titlebar-btn" id="win-maximize" title="Maximize" data-testid="win-maximize-btn"></button>
+        <button class="titlebar-btn titlebar-btn-close" id="win-close" title="Close" data-testid="win-close-btn"></button>
+      </div>
+    </div>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-dot" id="brand-dot"></span>
+        <span>GLauncher</span>
+      </div>
+      <nav class="topnav" id="topnav">
+        <div class="nav-pill" id="nav-pill"></div>
+        <div class="nav-item active" data-page="home" data-testid="nav-home"></div>
+        <div class="nav-item" data-page="content" data-testid="nav-content"></div>
+        <div class="nav-item" data-page="manage" data-testid="nav-manage"></div>
+        <div class="nav-item" data-page="skins" data-testid="nav-skins"></div>
+      </nav>
+      <div class="topbar-spacer"></div>
+      <div class="topbar-actions">
+        <button class="icon-btn" id="btn-activity" data-testid="topbar-activity-btn" title="Activity">
+          <span class="badge" id="activity-badge" style="display:none"></span>
+        </button>
+        <button class="icon-btn" id="btn-settings" data-testid="topbar-settings-btn" title="Settings"></button>
+      </div>
+    </header>
+
+    <main class="content">
+      <section class="page active" id="page-home" data-testid="page-home"></section>
+      <section class="page" id="page-content" data-testid="page-content"></section>
+      <section class="page" id="page-manage" data-testid="page-manage"></section>
+      <section class="page" id="page-skins" data-testid="page-skins"></section>
+    </main>
+
+    <div class="dock" id="dock">
+      <button class="dock-btn dock-account" id="dock-account" data-testid="dock-account-btn">
+        <img class="dock-avatar" id="dock-account-avatar" alt="" />
+        <div class="meta"><span class="label">Account</span><span class="value" id="dock-account-name">No account</span></div>
+        <span class="chev" id="dock-account-chev"></span>
+      </button>
+      <button class="dock-btn dock-instance" id="dock-instance" data-testid="dock-instance-btn">
+        <span class="dock-icon-badge" id="dock-instance-icon"></span>
+        <div class="meta"><span class="label">Instance</span><span class="value" id="dock-instance-name">No instance</span></div>
+        <span class="chev" id="dock-instance-chev"></span>
+      </button>
+      <div class="dock-play-wrap">
+        <button class="dock-play" id="dock-play" data-testid="dock-play-btn"></button>
+        <div class="dock-play-progress" id="dock-play-progress"><div class="fill"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast-stack"></div>
+  <div id="sheet-root"></div>
+  <div id="account-popover-root"></div>
+  <div id="instance-popover-root"></div>
+  <div id="console-root"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
