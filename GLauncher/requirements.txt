@@ -1,3 +1,0 @@
-minecraft-launcher-lib>=7.1
-pywebview>=5.0
-requests>=2.31
