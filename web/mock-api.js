@@ -70,8 +70,18 @@ window.pywebview = {
       return { hits: pool.slice(offset, offset + 20), total_hits: total };
     },
     async list_installed_content(id) { await delay(120); return { items: INSTALLED[id] || [] }; },
-    async get_settings() { return { ram_min_mb: 2048, ram_max_mb: 6144, java_path: "", base_dir: "~/GlassLauncher", version: "abc1234" }; },
-    async check_for_updates() { await delay(300); return { update_available: false, current: "abc1234" }; },
+    async get_settings() { return { ram_min_mb: 2048, ram_max_mb: 6144, java_path: "", base_dir: "~/GlassLauncher", version: "v1.0.0" }; },
+    async check_for_updates() {
+      await delay(300);
+      return {
+        update_available: true,
+        current: "v1.0.0",
+        latest: "v1.1.0",
+        latest_tag: "v1.1.0",
+        date: "2026-09-20T10:00:00Z",
+        body: "## Highlights\n- Faster Modrinth search\n- Fixed a crash when installing shaders\n\n### Notes\nSee the **README** for setup steps.",
+      };
+    },
     async start_update() { return { error: "Preview mode - no live updater here." }; },
     async restart_app() { return {}; },
     async list_tasks() { return []; },

@@ -1481,7 +1481,7 @@ async function openSettingsSheet() {
 
 /* ---- Version / update card inside the Settings sheet ---- */
 function updateSection(s) {
-  const versionLabel = el("span", {}, s.version ? s.version.slice(0, 7) : "unknown");
+  const versionLabel = el("span", {}, s.version || "unknown");
   const actionBtn = el("button", { class: "btn btn-ghost", "data-testid": "check-updates-btn" }, "Check for Updates");
   const progress = progressRow();
   const card = el("div", { class: "card", style: { marginTop: "16px" } }, [
@@ -1506,7 +1506,7 @@ function updateSection(s) {
     const result = await api("check_for_updates");
     actionBtn.disabled = false;
     if (result?.error) { toast(`Couldn't check for updates: ${result.error}`); setAction("Check for Updates", "btn-ghost", runCheck); return; }
-    if (result.frozen) { setAction("Check for Updates", "btn-ghost", runCheck); return; }
+    if (result.frozen || result.no_releases) { setAction("Check for Updates", "btn-ghost", runCheck); return; }
     if (result.update_available) {
       latestInfo = result;
       setAction(`Update to ${result.latest}`, "btn-primary", runUpdate);
@@ -1525,6 +1525,7 @@ function updateSection(s) {
     taskSubscribers.set(result.task_id, (task) => {
       progress.update(task.detail || task.error, task.progress, task.status === "error");
       if (task.status === "done") {
+        versionLabel.textContent = latestInfo?.latest || versionLabel.textContent;
         setAction("Restart to Apply", "btn-primary", () => api("restart_app"));
         actionBtn.disabled = false;
       } else if (task.status === "error") {
@@ -1538,14 +1539,40 @@ function updateSection(s) {
   return card;
 }
 
-/* ---- Prompt shown when the background loop finds a new commit ---- */
+/* ---- Tiny, safe subset-of-Markdown renderer for release changelogs ---- */
+function renderChangelog(md) {
+  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const lines = (md || "").replace(/\r\n/g, "\n").split("\n");
+  const html = [];
+  let inList = false;
+  const closeList = () => { if (inList) { html.push("</ul>"); inList = false; } };
+  for (let line of lines) {
+    line = line.trimEnd();
+    const heading = line.match(/^(#{1,6})\s+(.*)/);
+    const item = line.match(/^[-*]\s+(.*)/);
+    let inline = (s) => esc(s)
+      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+      .replace(/(?<!\*)\*(?!\*)(.+?)\*(?!\*)/g, "<em>$1</em>")
+      .replace(/`([^`]+)`/g, "<code>$1</code>")
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    if (heading) { closeList(); const lvl = Math.min(6, heading[1].length); html.push(`<h${lvl}>${inline(heading[2])}</h${lvl}>`); }
+    else if (item) { if (!inList) { html.push("<ul>"); inList = true; } html.push(`<li>${inline(item[1])}</li>`); }
+    else if (!line) { closeList(); }
+    else { closeList(); html.push(`<p>${inline(line)}</p>`); }
+  }
+  closeList();
+  return html.join("");
+}
+
+/* ---- Prompt shown when the background loop finds a new release ---- */
 window.onUpdateAvailable = (info) => {
   sheet.open(({ header, body, footer, close }) => {
     header.append(el("h2", {}, "Update available"));
     const progress = progressRow();
+    const changelog = el("div", { class: "changelog", html: renderChangelog(info.body) });
     body.append(
-      el("div", { class: "text-small" }, info.message || "A new version of GLauncher is ready."),
-      el("div", { class: "text-small", style: { marginTop: "6px", opacity: "0.7" } }, `${info.current} → ${info.latest}${info.date ? " · " + fmtDate(info.date) : ""}`),
+      el("div", { class: "text-small" }, `${info.current} → ${info.latest}${info.date ? " · " + fmtDate(info.date) : ""}`),
+      changelog,
       progress.node
     );
     const laterBtn = el("button", { class: "btn btn-ghost" }, "Later");

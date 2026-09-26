@@ -1,13 +1,17 @@
 """
-Self-update from the GLauncher GitHub repository.
+Self-update from GitHub Releases on the GLauncher repo.
 
-There are no GitHub Releases yet (see README - the installer/portable-zip
-release flow is still planned), so this tracks the tip of `main` directly:
-it compares the latest commit SHA on the branch against the SHA we last
-updated to, and - when the two differ - downloads the branch as a zipball,
-and overwrites just the source files (main.py, api.py, core/, web/, ...)
-in place, leaving the data/ directory (accounts, instances, settings)
-completely untouched.
+This tracks the repo's *latest published release* (tag name, release name,
+and changelog body) rather than raw commits, so the update prompt can show
+a real version name and changelog instead of a commit hash. That means
+updates only show up once a release is actually published on GitHub - a
+push to `main` alone won't trigger anything. When it's time to ship an
+update, publish a GitHub Release (Releases > Draft a new release) and this
+picks it up on its own.
+
+The release's own source zip is what gets applied: just the source files
+(main.py, api.py, core/, web/, ...) are overwritten in place, leaving the
+data/ directory (accounts, instances, settings) completely untouched.
 
 This only makes sense for a "run from source" checkout. When frozen (e.g. a
 future PyInstaller .exe build), the running executable is a compiled binary
@@ -31,9 +35,7 @@ from typing import Callable, Optional
 from .instances import _launcher_root
 
 REPO = "lazvom/GLauncher"
-BRANCH = "main"
-API_COMMIT_URL = f"https://api.github.com/repos/{REPO}/commits/{BRANCH}"
-ZIPBALL_URL = f"https://codeload.github.com/{REPO}/zip/refs/heads/{BRANCH}"
+API_LATEST_RELEASE_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 USER_AGENT = "GLauncher-updater"
 
 # Top-level entries that make up the app's source; everything else in the
@@ -52,18 +54,23 @@ def _version_file() -> str:
     return os.path.join(_launcher_root(), VERSION_FILENAME)
 
 
-def get_local_commit() -> Optional[str]:
+def get_local_release() -> Optional[dict]:
+    """The release we last updated to: {"tag", "name"}, or None if this
+    install has never recorded one (fresh checkout, or updater just added)."""
     try:
         with open(_version_file(), "r", encoding="utf-8") as f:
-            return json.load(f).get("sha")
+            data = json.load(f)
+        if not data.get("tag"):
+            return None
+        return data
     except Exception:
         return None
 
 
-def _set_local_commit(sha: str) -> None:
+def _set_local_release(tag: str, name: str) -> None:
     try:
         with open(_version_file(), "w", encoding="utf-8") as f:
-            json.dump({"sha": sha}, f)
+            json.dump({"tag": tag, "name": name}, f)
     except OSError:
         pass
 
@@ -77,56 +84,73 @@ def _get_json(url: str) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def get_remote_commit() -> dict:
-    """Latest commit on the tracked branch: {"sha", "message", "date"}.
-    Raises on network/API failure - callers should catch and surface it."""
-    data = _get_json(API_COMMIT_URL)
-    commit = data.get("commit", {})
-    message = (commit.get("message") or "").split("\n", 1)[0]  # first line only
-    date = (commit.get("committer") or commit.get("author") or {}).get("date", "")
-    return {"sha": data["sha"], "message": message, "date": date}
+def get_remote_release() -> Optional[dict]:
+    """The latest published release: {"tag", "name", "body", "date",
+    "zip_url"}, or None if the repo has no releases published yet. Raises
+    on any other network/API failure - callers should catch and surface it."""
+    try:
+        data = _get_json(API_LATEST_RELEASE_URL)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise
+    return {
+        "tag": data["tag_name"],
+        "name": data.get("name") or data["tag_name"],
+        "body": data.get("body") or "",
+        "date": data.get("published_at", ""),
+        "zip_url": data["zipball_url"],
+    }
 
 
 def check_for_update() -> dict:
     """Returns a dict describing update status, or {"error": ...}. Never
-    raises. If this is the very first check (no local commit recorded yet),
-    the current remote tip is adopted as the baseline silently, rather than
-    reporting an "update" for a version that may already be what's on disk."""
+    raises. If this is the very first check (no local release recorded
+    yet), the current latest release is adopted as the baseline silently,
+    rather than reporting an "update" for a version that may already be
+    what's on disk."""
     if is_frozen():
         return {"update_available": False, "frozen": True}
     try:
-        remote = get_remote_commit()
+        remote = get_remote_release()
     except (urllib.error.URLError, TimeoutError, KeyError, ValueError) as e:
         return {"error": str(e)}
 
-    local = get_local_commit()
+    if remote is None:
+        local = get_local_release()
+        return {"update_available": False, "current": local["name"] if local else None, "no_releases": True}
+
+    local = get_local_release()
     if local is None:
-        _set_local_commit(remote["sha"])
-        return {"update_available": False, "current": remote["sha"][:7]}
+        _set_local_release(remote["tag"], remote["name"])
+        return {"update_available": False, "current": remote["name"]}
 
     return {
-        "update_available": local != remote["sha"],
-        "current": local[:7],
-        "latest": remote["sha"][:7],
-        "latest_full": remote["sha"],
-        "message": remote["message"],
+        "update_available": local["tag"] != remote["tag"],
+        "current": local["name"],
+        "latest": remote["name"],
+        "latest_tag": remote["tag"],
+        "body": remote["body"],
         "date": remote["date"],
     }
 
 
 def apply_update(update: Callable[[Optional[float], str], None]) -> dict:
-    """Downloads the branch zipball and replaces TRACKED_PATHS in the
-    launcher root with their contents. `update(progress, detail)` is called
-    as work proceeds, matching the TaskManager work_fn convention (progress
-    is 0..1, or None while indeterminate). Returns {"sha": ...} on success;
-    raises on failure so the caller's task ends up in the "error" state."""
+    """Downloads the latest release's source zip and replaces TRACKED_PATHS
+    in the launcher root with its contents. `update(progress, detail)` is
+    called as work proceeds, matching the TaskManager work_fn convention
+    (progress is 0..1, or None while indeterminate). Returns {"tag",
+    "name"} on success; raises on failure so the caller's task ends up in
+    the "error" state."""
     if is_frozen():
         raise RuntimeError("Auto-update isn't available for this build yet.")
 
-    remote = get_remote_commit()
+    remote = get_remote_release()
+    if remote is None:
+        raise RuntimeError("No published release found.")
 
     update(0, "Downloading update...")
-    req = urllib.request.Request(ZIPBALL_URL, headers={"User-Agent": USER_AGENT})
+    req = urllib.request.Request(remote["zip_url"], headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=60) as resp:
         total = resp.length or 0
         chunks = []
@@ -149,7 +173,8 @@ def apply_update(update: Callable[[Optional[float], str], None]) -> dict:
         with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
             zf.extractall(tmp)
 
-        # GitHub zipballs contain one top-level folder, e.g. "GLauncher-main".
+        # GitHub's release/zipball archives contain one top-level folder,
+        # e.g. "lazvom-GLauncher-abc1234".
         entries = os.listdir(tmp)
         if len(entries) != 1:
             raise RuntimeError("Unexpected archive layout from GitHub.")
@@ -169,9 +194,9 @@ def apply_update(update: Callable[[Optional[float], str], None]) -> dict:
                 os.makedirs(os.path.dirname(dest) or root, exist_ok=True)
                 shutil.copy2(src, dest)
 
-    _set_local_commit(remote["sha"])
+    _set_local_release(remote["tag"], remote["name"])
     update(1.0, "Update installed")
-    return {"sha": remote["sha"]}
+    return {"tag": remote["tag"], "name": remote["name"]}
 
 
 def restart_app() -> None:

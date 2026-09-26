@@ -645,7 +645,7 @@ class Api:
             "ram_max_mb": self.settings.ram_max_mb,
             "java_path": self.settings.java_path,
             "base_dir": self.im.base_dir,
-            "version": updater.get_local_commit(),
+            "version": (updater.get_local_release() or {}).get("name"),
         }
 
     def save_settings(self, ram_min_mb, ram_max_mb, java_path):
