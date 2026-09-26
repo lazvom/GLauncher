@@ -1470,13 +1470,109 @@ async function openSettingsSheet() {
       el("div", { class: "text-small", style: { marginBottom: "12px" } }, `Data directory: ${s.base_dir}`),
       el("div", { class: "field-label", style: { marginTop: "0" } }, [document.createTextNode("Min RAM: "), ramMinLabel, document.createTextNode(" MB")]), ramMin,
       el("div", { class: "field-label" }, [document.createTextNode("Max RAM: "), ramMaxLabel, document.createTextNode(" MB")]), ramMax,
-      el("div", { class: "field-label" }, "Custom Java executable (optional)"), javaInput
+      el("div", { class: "field-label" }, "Custom Java executable (optional)"), javaInput,
+      updateSection(s)
     );
     const saveBtn = el("button", { class: "btn btn-primary", "data-testid": "settings-save-btn" }, "Save settings");
     footer.append(el("button", { class: "btn btn-ghost", onclick: close }, "Cancel"), saveBtn);
     saveBtn.addEventListener("click", async () => { await api("save_settings", ramMin.value, ramMax.value, javaInput.value.trim()); toast("Settings saved.", "success"); close(); });
   });
 }
+
+/* ---- Version / update card inside the Settings sheet ---- */
+function updateSection(s) {
+  const versionLabel = el("span", {}, s.version ? s.version.slice(0, 7) : "unknown");
+  const actionBtn = el("button", { class: "btn btn-ghost", "data-testid": "check-updates-btn" }, "Check for Updates");
+  const progress = progressRow();
+  const card = el("div", { class: "card", style: { marginTop: "16px" } }, [
+    el("div", { class: "card-row" }, [
+      el("div", {}, [el("div", { class: "field-label", style: { marginTop: "0" } }, "Version"), versionLabel]),
+      actionBtn,
+    ]),
+    progress.node,
+  ]);
+
+  let latestInfo = null;
+
+  const setAction = (label, kind, handler) => {
+    actionBtn.textContent = label;
+    actionBtn.className = `btn ${kind}`;
+    actionBtn.onclick = handler;
+  };
+
+  const runCheck = async () => {
+    actionBtn.disabled = true;
+    actionBtn.textContent = "Checking...";
+    const result = await api("check_for_updates");
+    actionBtn.disabled = false;
+    if (result?.error) { toast(`Couldn't check for updates: ${result.error}`); setAction("Check for Updates", "btn-ghost", runCheck); return; }
+    if (result.frozen) { setAction("Check for Updates", "btn-ghost", runCheck); return; }
+    if (result.update_available) {
+      latestInfo = result;
+      setAction(`Update to ${result.latest}`, "btn-primary", runUpdate);
+    } else {
+      toast("You're up to date.", "success");
+      setAction("Check for Updates", "btn-ghost", runCheck);
+    }
+  };
+
+  const runUpdate = async () => {
+    actionBtn.disabled = true;
+    progress.show();
+    progress.update("Starting update...", null);
+    const result = await api("start_update");
+    if (result?.error) { actionBtn.disabled = false; toast(result.error); return; }
+    taskSubscribers.set(result.task_id, (task) => {
+      progress.update(task.detail || task.error, task.progress, task.status === "error");
+      if (task.status === "done") {
+        setAction("Restart to Apply", "btn-primary", () => api("restart_app"));
+        actionBtn.disabled = false;
+      } else if (task.status === "error") {
+        actionBtn.disabled = false;
+        setAction(`Update to ${latestInfo?.latest || ""}`, "btn-primary", runUpdate);
+      }
+    });
+  };
+
+  setAction("Check for Updates", "btn-ghost", runCheck);
+  return card;
+}
+
+/* ---- Prompt shown when the background loop finds a new commit ---- */
+window.onUpdateAvailable = (info) => {
+  sheet.open(({ header, body, footer, close }) => {
+    header.append(el("h2", {}, "Update available"));
+    const progress = progressRow();
+    body.append(
+      el("div", { class: "text-small" }, info.message || "A new version of GLauncher is ready."),
+      el("div", { class: "text-small", style: { marginTop: "6px", opacity: "0.7" } }, `${info.current} → ${info.latest}${info.date ? " · " + fmtDate(info.date) : ""}`),
+      progress.node
+    );
+    const laterBtn = el("button", { class: "btn btn-ghost" }, "Later");
+    const updateBtn = el("button", { class: "btn btn-primary" }, "Update Now");
+    footer.append(laterBtn, updateBtn);
+    laterBtn.addEventListener("click", close);
+    updateBtn.addEventListener("click", async () => {
+      updateBtn.disabled = true;
+      laterBtn.disabled = true;
+      progress.show();
+      progress.update("Starting update...", null);
+      const result = await api("start_update");
+      if (result?.error) { toast(result.error); close(); return; }
+      taskSubscribers.set(result.task_id, (task) => {
+        progress.update(task.detail || task.error, task.progress, task.status === "error");
+        if (task.status === "done") {
+          updateBtn.textContent = "Restart Now";
+          updateBtn.disabled = false;
+          updateBtn.onclick = () => api("restart_app");
+        } else if (task.status === "error") {
+          updateBtn.disabled = false;
+          laterBtn.disabled = false;
+        }
+      });
+    });
+  });
+};
 
 async function openActivitySheet() {
   const tasks = await api("list_tasks");

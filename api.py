@@ -32,6 +32,7 @@ from core.auth import AccountStore, MicrosoftDeviceCodeFlow
 from core.instances import InstanceManager
 from core.settings import Settings
 from core.tasks import TaskManager
+from core import updater
 
 
 def _instance_to_dict(inst) -> dict:
@@ -74,6 +75,7 @@ class Api:
 
         threading.Thread(target=self._dispatch_loop, daemon=True).start()
         threading.Thread(target=self._token_refresh_loop, daemon=True).start()
+        threading.Thread(target=self._update_check_loop, daemon=True).start()
 
     # ------------------------------------------------------------- push loop
     def _dispatch_loop(self):
@@ -101,6 +103,22 @@ class Api:
             except Exception:
                 pass
             time.sleep(5 * 60)
+
+    def _update_check_loop(self):
+        """Checks the GitHub repo for a newer commit shortly after launch,
+        then again periodically for as long as the launcher stays open, and
+        pushes onUpdateAvailable to the page whenever one is found. A
+        silent, best-effort background check - never interrupts anything,
+        never raises into the UI."""
+        time.sleep(4)
+        while True:
+            try:
+                result = updater.check_for_update()
+                if result.get("update_available"):
+                    self._push("onUpdateAvailable", result)
+            except Exception:
+                pass
+            time.sleep(2 * 60 * 60)
 
     def _push(self, js_fn: str, *args):
         if not self._window:
@@ -627,6 +645,7 @@ class Api:
             "ram_max_mb": self.settings.ram_max_mb,
             "java_path": self.settings.java_path,
             "base_dir": self.im.base_dir,
+            "version": updater.get_local_commit(),
         }
 
     def save_settings(self, ram_min_mb, ram_max_mb, java_path):
@@ -642,6 +661,29 @@ class Api:
     def set_console_minimized(self, minimized):
         self.settings.console_minimized = bool(minimized)
         self.settings.save()
+
+    # --------------------------------------------------------------- update
+    def check_for_updates(self):
+        """Manual check (Settings > Check for Updates). The background
+        loop in __init__ also does this on its own; this is just an
+        on-demand poke that returns the result directly instead of via
+        onUpdateAvailable, so the button can show "You're up to date"."""
+        return updater.check_for_update()
+
+    def start_update(self):
+        if updater.is_frozen():
+            return {"error": "Auto-update isn't available for this build yet."}
+
+        def work(update):
+            return updater.apply_update(update)
+
+        task_id = self.tasks.start("Update GLauncher", work, kind="update")
+        return {"task_id": task_id}
+
+    def restart_app(self):
+        # Runs on the calling (pywebview JS-bridge) thread; os.execv replaces
+        # the process image, so nothing after this line ever executes.
+        updater.restart_app()
 
     # -------------------------------------------------------- window chrome
     # The visible title bar is HTML, while core/winchrome.py handles its

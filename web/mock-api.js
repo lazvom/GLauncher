@@ -70,7 +70,10 @@ window.pywebview = {
       return { hits: pool.slice(offset, offset + 20), total_hits: total };
     },
     async list_installed_content(id) { await delay(120); return { items: INSTALLED[id] || [] }; },
-    async get_settings() { return { ram_min_mb: 2048, ram_max_mb: 6144, java_path: "", base_dir: "~/GlassLauncher" }; },
+    async get_settings() { return { ram_min_mb: 2048, ram_max_mb: 6144, java_path: "", base_dir: "~/GlassLauncher", version: "abc1234" }; },
+    async check_for_updates() { await delay(300); return { update_available: false, current: "abc1234" }; },
+    async start_update() { return { error: "Preview mode - no live updater here." }; },
+    async restart_app() { return {}; },
     async list_tasks() { return []; },
     async clear_finished_tasks() { return []; },
     async get_skin_profile() { return { error: "Skins and capes require a signed-in Microsoft account (offline accounts always show the default Steve/Alex model — that's normal, not a bug)." }; },
