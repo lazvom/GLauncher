@@ -13,11 +13,12 @@ The release's own source zip is what gets applied: just the source files
 (main.py, api.py, core/, web/, ...) are overwritten in place, leaving the
 data/ directory (accounts, instances, settings) completely untouched.
 
-This only makes sense for a "run from source" checkout. When frozen (e.g. a
-future PyInstaller .exe build), the running executable is a compiled binary
-that new .py files wouldn't affect, so update checks there are skipped -
-frozen builds should get their own installer/release-based update path
-later instead.
+This only takes effect for a source checkout - i.e. `python main.py`
+directly, or `launcher.py` (see that file) spawning main.py as a real,
+unfrozen Python process. If main.py itself were ever frozen directly with
+PyInstaller, the running executable would be a compiled binary that new
+.py files wouldn't affect, so the check is skipped in that case (see
+is_frozen()) - `launcher.py` exists specifically so that doesn't happen.
 """
 from __future__ import annotations
 
@@ -41,7 +42,7 @@ USER_AGENT = "GLauncher-updater"
 # Top-level entries that make up the app's source; everything else in the
 # launcher root (data/, settings.json, __pycache__, this version file, any
 # user-added files) is left alone.
-TRACKED_PATHS = ["main.py", "api.py", "requirements.txt", "README.md", "core", "web"]
+TRACKED_PATHS = ["main.py", "api.py", "launcher.py", "requirements.txt", "README.md", "core", "web", "scripts"]
 
 VERSION_FILENAME = ".glauncher_version"
 
