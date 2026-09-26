@@ -9,9 +9,14 @@ push to `main` alone won't trigger anything. When it's time to ship an
 update, publish a GitHub Release (Releases > Draft a new release) and this
 picks it up on its own.
 
-The release's own source zip is what gets applied: just the source files
-(main.py, api.py, core/, web/, ...) are overwritten in place, leaving the
-data/ directory (accounts, instances, settings) completely untouched.
+The release's own source zip is what gets applied: everything in it is
+synced into the launcher root except a short exclusion list (see
+EXCLUDED_FROM_SYNC below) - so a release that adds a brand new file or
+folder just installs it, no code change needed here to recognise it. The
+data/ directory (accounts, instances, settings) is always left untouched.
+requirements.txt is also re-installed after syncing, so a release that
+adds a new dependency gets it pulled in automatically too, not just the
+new .py files that import it.
 
 This only takes effect for a source checkout - i.e. `python main.py`
 directly, or `launcher.py` (see that file) spawning main.py as a real,
@@ -26,6 +31,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import urllib.request
@@ -39,12 +45,20 @@ REPO = "lazvom/GLauncher"
 API_LATEST_RELEASE_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 USER_AGENT = "GLauncher-updater"
 
-# Top-level entries that make up the app's source; everything else in the
-# launcher root (data/, settings.json, __pycache__, this version file, any
-# user-added files) is left alone.
-TRACKED_PATHS = ["main.py", "api.py", "launcher.py", "requirements.txt", "README.md", "core", "web", "scripts"]
-
 VERSION_FILENAME = ".glauncher_version"
+
+# Everything in the launcher root is synced from a release EXCEPT these -
+# so a release that adds a brand new file or folder just shows up after
+# updating, with nothing to configure here. data/ is the user's accounts,
+# instances and settings; python-embed/ is the runtime a packaged .exe
+# runs on (see scripts/setup_python_embed.ps1); the rest is either
+# bookkeeping that doesn't belong in a running install, or metadata that
+# only makes sense inside a git checkout, not something GitHub's own
+# release zipball can strip out on its own.
+EXCLUDED_FROM_SYNC = {
+    "data", "python-embed", "__pycache__", VERSION_FILENAME,
+    ".git", ".github", ".gitignore", ".gitattributes", "LICENSE",
+}
 
 
 def is_frozen() -> bool:
@@ -137,12 +151,14 @@ def check_for_update() -> dict:
 
 
 def apply_update(update: Callable[[Optional[float], str], None]) -> dict:
-    """Downloads the latest release's source zip and replaces TRACKED_PATHS
-    in the launcher root with its contents. `update(progress, detail)` is
-    called as work proceeds, matching the TaskManager work_fn convention
-    (progress is 0..1, or None while indeterminate). Returns {"tag",
-    "name"} on success; raises on failure so the caller's task ends up in
-    the "error" state."""
+    """Downloads the latest release's source zip and syncs it into the
+    launcher root (see EXCLUDED_FROM_SYNC for what's left alone), then
+    installs requirements.txt again so any new dependency the update
+    needs is pulled in too - not just new/changed source files.
+    `update(progress, detail)` is called as work proceeds, matching the
+    TaskManager work_fn convention (progress is 0..1, or None while
+    indeterminate). Returns {"tag", "name"} on success; raises on failure
+    so the caller's task ends up in the "error" state."""
     if is_frozen():
         raise RuntimeError("Auto-update isn't available for this build yet.")
 
@@ -163,12 +179,12 @@ def apply_update(update: Callable[[Optional[float], str], None]) -> dict:
             chunks.append(chunk)
             read += len(chunk)
             if total:
-                update(min(0.7, 0.7 * read / total), "Downloading update...")
+                update(min(0.55, 0.55 * read / total), "Downloading update...")
             else:
                 update(None, "Downloading update...")
         archive_bytes = b"".join(chunks)
 
-    update(0.75, "Extracting...")
+    update(0.6, "Extracting...")
     root = _launcher_root()
     with tempfile.TemporaryDirectory(prefix="glauncher_update_") as tmp:
         with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
@@ -181,11 +197,14 @@ def apply_update(update: Callable[[Optional[float], str], None]) -> dict:
             raise RuntimeError("Unexpected archive layout from GitHub.")
         extracted_root = os.path.join(tmp, entries[0])
 
-        update(0.85, "Applying update...")
-        for name in TRACKED_PATHS:
-            src = os.path.join(extracted_root, name)
-            if not os.path.exists(src):
+        update(0.65, "Applying update...")
+        # Sync every top-level entry the release ships, not a fixed list -
+        # so a release that adds a brand new file/folder installs it here
+        # automatically, with no code change needed to recognise it.
+        for name in os.listdir(extracted_root):
+            if name in EXCLUDED_FROM_SYNC:
                 continue
+            src = os.path.join(extracted_root, name)
             dest = os.path.join(root, name)
             if os.path.isdir(src):
                 if os.path.exists(dest):
@@ -195,9 +214,40 @@ def apply_update(update: Callable[[Optional[float], str], None]) -> dict:
                 os.makedirs(os.path.dirname(dest) or root, exist_ok=True)
                 shutil.copy2(src, dest)
 
+    _install_requirements(root, update)
+
     _set_local_release(remote["tag"], remote["name"])
     update(1.0, "Update installed")
     return {"tag": remote["tag"], "name": remote["name"]}
+
+
+def _install_requirements(root: str, update: Callable[[Optional[float], str], None]) -> None:
+    """Runs `pip install -r requirements.txt` with the *current*
+    interpreter (sys.executable) after syncing files, so a release that
+    adds a new dependency doesn't just get skipped until someone thinks
+    to reinstall it by hand. sys.executable is correct whether that's a
+    system Python (dev/source runs) or python-embed's python.exe (when
+    this process was spawned by the launcher.py stub) - either way it's
+    the interpreter main.py is actually running under right now."""
+    req_file = os.path.join(root, "requirements.txt")
+    if not os.path.isfile(req_file):
+        return
+    update(0.85, "Installing dependencies...")
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-r", req_file, "--no-warn-script-location"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except FileNotFoundError as e:
+        raise RuntimeError(f"Couldn't run pip to install dependencies: {e}") from e
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError("Installing dependencies timed out.") from e
+    except subprocess.CalledProcessError as e:
+        detail = (e.stderr or e.stdout or "").strip().splitlines()[-1:] or [str(e)]
+        raise RuntimeError(f"Installing dependencies failed: {detail[0]}") from e
 
 
 def restart_app() -> None:
