@@ -62,6 +62,17 @@ EXCLUDED_FROM_SYNC = {
 }
 
 MAX_UPDATE_ARCHIVE_BYTES = 250 * 1024 * 1024
+
+# Two distinct stages, two distinct expected hosts - conflating them is what
+# made every real update report "unexpected update host":
+#  1. The release JSON's own "zipball_url" field is an api.github.com URL
+#     (e.g. https://api.github.com/repos/<repo>/zipball/<tag>) - that's the
+#     host GitHub documents for this field, so it's what gets checked before
+#     we ever follow it.
+#  2. Actually requesting that URL 302s to a signed, short-lived download on
+#     codeload.github.com - that's the host that must serve the real bytes,
+#     checked against resp.geturl() in apply_update() after redirects.
+ALLOWED_API_ZIP_HOSTS = {"api.github.com"}
 ALLOWED_ZIP_HOSTS = {"codeload.github.com", "github.com"}
 
 
@@ -119,7 +130,7 @@ def get_remote_release() -> Optional[dict]:
             raise RuntimeError("GitHub API rate limit exceeded for your network - try again later.") from e
         raise
     zip_url = data["zipball_url"]
-    if not is_https_host(zip_url, ALLOWED_ZIP_HOSTS):
+    if not is_https_host(zip_url, ALLOWED_API_ZIP_HOSTS):
         raise ValueError("GitHub returned an unexpected update host.")
     if data.get("draft") or data.get("prerelease"):
         return None
