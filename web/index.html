@@ -7,6 +7,20 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="style.css" />
+  <script>
+    // Applied synchronously, before first paint, from a same-origin local
+    // cache so switching themes doesn't show a flash of the previous theme
+    // while app.js (a module, loaded async) starts up and asks Python for
+    // the real saved value. app.js reconciles this against core/settings.py
+    // (the actual source of truth) once the pywebview bridge is ready, and
+    // keeps this cache in sync whenever the theme changes.
+    (function () {
+      try {
+        var cached = localStorage.getItem("glauncher-theme");
+        if (cached) document.documentElement.setAttribute("data-theme", cached);
+      } catch (e) { /* localStorage unavailable - falls back to the default theme */ }
+    })();
+  </script>
 </head>
 <body>
   <div id="bg-layer"></div>
@@ -101,6 +115,7 @@
   <div id="account-popover-root"></div>
   <div id="instance-popover-root"></div>
   <div id="console-root"></div>
+  <div id="onboarding-root"></div>
 
   <script type="module" src="app.js"></script>
 </body>

@@ -13,16 +13,29 @@ overwrite main.py/core/web in place - the next time this stub runs it, it
 picks up the new code automatically. Nothing about core/updater.py needs
 to know this stub exists.
 
-Where it looks for Python, in order:
-  1. <this exe's folder>/python-embed/  - a Python "embeddable" distribution
-     you place next to the exe (see scripts/setup_python_embed.ps1, or the
-     Packaging section in README.md, for how to set that up once).
-  2. A system Python already on PATH (mainly useful when running this file
-     directly during development, unfrozen).
+Where it looks for main.py (and python-embed/), in order:
+  1. Directly next to the exe - the recommended layout (see the
+     Packaging section in README.md): build with auto-py-to-exe pointed
+     at *only* this file, with no "Add Files"/"Add Folder" entries, then
+     copy main.py, api.py, core/, web/, requirements.txt and python-embed/
+     into the output folder next to the exe yourself, afterwards.
+  2. Inside an _internal/ folder next to the exe. This is a fallback for
+     when main.py (and friends) were instead added to auto-py-to-exe as
+     "Additional Files" - PyInstaller 6+'s --onedir builds put anything
+     bundled that way inside _internal/ rather than leaving it beside the
+     exe, which is an easy layout to end up with by accident. It still
+     works from there, but see the README note above: it means every
+     update also lands inside _internal/ instead of next to the exe,
+     which is a bit unusual to browse to by hand later.
 
-If neither is found, it shows a plain message box (no console window is
-assumed, since this is normally built with auto-py-to-exe in
-"window based" mode) and exits instead of silently doing nothing.
+Python itself (python-embed/) is looked for next to the exe first, then
+inside whichever of the two locations above main.py was actually found in,
+then finally a system Python on PATH.
+
+If neither main.py nor a Python interpreter is found, this shows a plain
+message box (no console window is assumed, since this is normally built
+with auto-py-to-exe in "window based" mode) and exits instead of silently
+doing nothing.
 """
 from __future__ import annotations
 
@@ -40,21 +53,34 @@ def _base_dir() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
-def _find_python(base: str) -> str | None:
-    embed_dir = os.path.join(base, "python-embed")
-    if os.name == "nt":
-        candidates = [
-            os.path.join(embed_dir, "pythonw.exe"),  # no console flash
-            os.path.join(embed_dir, "python.exe"),
-        ]
-    else:
-        candidates = [
-            os.path.join(embed_dir, "bin", "python3"),
-            os.path.join(embed_dir, "bin", "python"),
-        ]
-    for c in candidates:
-        if os.path.isfile(c):
-            return c
+def _find_app_root(base: str) -> str | None:
+    """Where main.py actually lives: directly in `base`, or inside a
+    PyInstaller-generated `base/_internal/` (see the module docstring for
+    why that happens). Returns None if it isn't in either place."""
+    if os.path.isfile(os.path.join(base, "main.py")):
+        return base
+    internal = os.path.join(base, "_internal")
+    if os.path.isfile(os.path.join(internal, "main.py")):
+        return internal
+    return None
+
+
+def _find_python(*search_dirs: str) -> str | None:
+    for d in search_dirs:
+        embed_dir = os.path.join(d, "python-embed")
+        if os.name == "nt":
+            candidates = [
+                os.path.join(embed_dir, "pythonw.exe"),  # no console flash
+                os.path.join(embed_dir, "python.exe"),
+            ]
+        else:
+            candidates = [
+                os.path.join(embed_dir, "bin", "python3"),
+                os.path.join(embed_dir, "bin", "python"),
+            ]
+        for c in candidates:
+            if os.path.isfile(c):
+                return c
 
     # Fall back to whatever Python is already on PATH (dev runs, or a
     # user who'd rather rely on a system install than an embedded one).
@@ -81,17 +107,25 @@ def _show_error(message: str) -> None:
 
 def main() -> int:
     base = _base_dir()
-    main_py = os.path.join(base, "main.py")
+    root = _find_app_root(base)
 
-    if not os.path.isfile(main_py):
+    if root is None:
         _show_error(
-            "main.py wasn't found next to GLauncher.exe.\n\n"
+            "main.py wasn't found next to GLauncher.exe (or in an "
+            "_internal/ folder next to it).\n\n"
             "This launcher expects to sit alongside main.py, api.py, core/ "
-            "and web/ - the actual app source - not to contain it."
+            "and web/ - the actual app source - not to contain it. If you "
+            "added those as \"Additional Files\" in auto-py-to-exe, try "
+            "building with just this file instead, and copy the source "
+            "files next to the built exe by hand afterwards."
         )
         return 1
+    main_py = os.path.join(root, "main.py")
 
-    python = _find_python(base)
+    # python-embed/ is expected next to the exe; if main.py ended up inside
+    # _internal/, also check there, since anything bundled alongside it
+    # would've landed in the same place.
+    python = _find_python(base, root)
     if not python:
         _show_error(
             "No Python interpreter was found.\n\n"
@@ -107,7 +141,7 @@ def main() -> int:
     creationflags = 0
     if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW"):
         creationflags = subprocess.CREATE_NO_WINDOW
-    proc = subprocess.Popen([python, main_py, *sys.argv[1:]], cwd=base, creationflags=creationflags)
+    proc = subprocess.Popen([python, main_py, *sys.argv[1:]], cwd=root, creationflags=creationflags)
     return proc.wait()
 
 

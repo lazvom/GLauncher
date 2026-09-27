@@ -30,9 +30,11 @@ from core import skins as sk
 from core import winchrome
 from core.auth import AccountStore, MicrosoftDeviceCodeFlow, MicrosoftAuthCodeFlow
 from core.instances import InstanceManager
-from core.settings import Settings
+from core.settings import Settings, THEMES
 from core.tasks import TaskManager
 from core import updater
+from core.patch_sanitize import sanitize_patch_html
+from core.security import is_https_host
 
 
 def _instance_to_dict(inst) -> dict:
@@ -74,6 +76,7 @@ class Api:
         self._ms_last_device_data: dict | None = None
         self._ms_authcode_url: str | None = None
         self._window = None  # set by main.py right after the window is created
+        self._approved_skin_files: set[str] = set()
 
         threading.Thread(target=self._dispatch_loop, daemon=True).start()
         threading.Thread(target=self._token_refresh_loop, daemon=True).start()
@@ -657,7 +660,11 @@ class Api:
             )
             if not result:
                 return {"path": None}
-            return {"path": result[0]}
+            path = os.path.abspath(result[0])
+            if not path.lower().endswith(".png") or not os.path.isfile(path):
+                return {"error": "Please select a PNG skin file."}
+            self._approved_skin_files.add(os.path.normcase(path))
+            return {"path": path}
         except Exception as e:
             return {"error": str(e)}
 
@@ -666,7 +673,17 @@ class Api:
         if err:
             return err
         try:
-            return sk.upload_skin_file(acc.access_token, file_path, variant)
+            path = os.path.normcase(os.path.abspath(str(file_path or "")))
+            if path not in self._approved_skin_files:
+                return {"error": "Select the skin file with the file picker first."}
+            if not path.lower().endswith(".png") or not os.path.isfile(path):
+                self._approved_skin_files.discard(path)
+                return {"error": "The selected skin file is no longer available."}
+            if os.path.getsize(path) > 8 * 1024 * 1024:
+                return {"error": "Skin file is too large."}
+            result = sk.upload_skin_file(acc.access_token, path, variant)
+            self._approved_skin_files.discard(path)
+            return result
         except Exception as e:
             return {"error": str(e)}
 
@@ -715,7 +732,40 @@ class Api:
             "launch_arguments": self.settings.launch_arguments,
             "base_dir": self.im.base_dir,
             "version": (updater.get_local_release() or {}).get("name"),
+            "theme": self.settings.theme,
         }
+
+    # ----------------------------------------------------------------- theme
+    def get_theme(self):
+        """Small, fast call used at startup (before the rest of Settings is
+        needed) so the page can apply the saved theme, and decide whether to
+        show the first-run intro, as early as possible."""
+        return {"theme": self.settings.theme, "themes": list(THEMES), "onboarded": self.settings.onboarded}
+
+    def set_theme(self, theme):
+        """Applied instantly from the Settings sheet, independent of the
+        Save/Cancel flow the RAM/Java/launch-argument fields use. Rejects
+        anything not in THEMES rather than trusting the page - the same
+        allow-list core/settings.py itself validates against on load."""
+        theme = str(theme or "")
+        if theme not in THEMES:
+            return {"error": "Unknown theme."}
+        self.settings.theme = theme
+        self.settings.save()
+        return {"theme": self.settings.theme}
+
+    def complete_onboarding(self, theme):
+        """Called once, from the first-run intro screen's "Get Started"
+        button. Validates theme the same way set_theme does - the intro
+        screen is the one place a first-time player picks a theme, but it
+        should never be able to write anything set_theme itself couldn't."""
+        theme = str(theme or "")
+        if theme not in THEMES:
+            return {"error": "Unknown theme."}
+        self.settings.theme = theme
+        self.settings.onboarded = True
+        self.settings.save()
+        return {"theme": self.settings.theme, "onboarded": True}
 
     def save_settings(self, ram_min_mb, ram_max_mb, java_path, launch_arguments=""):
         self.settings.ram_min_mb = int(ram_min_mb)
@@ -797,6 +847,9 @@ class Api:
             entries = []
             for e in (data.get("entries") or [])[:limit]:
                 img = (e.get("image") or {}).get("url") or ""
+                image_url = (self._PATCH_BASE + img) if img.startswith("/") else img
+                if image_url and not is_https_host(image_url, {"launchercontent.mojang.com"}):
+                    image_url = ""
                 entries.append({
                     "title": e.get("title"),
                     "version": e.get("version"),
@@ -805,7 +858,7 @@ class Api:
                     "shortText": e.get("shortText"),
                     "contentPath": e.get("contentPath"),
                     "id": e.get("id"),
-                    "image": (self._PATCH_BASE + img) if img.startswith("/") else img,
+                    "image": image_url,
                 })
             return {"entries": entries}
         except Exception as e:
@@ -820,16 +873,18 @@ class Api:
             r.raise_for_status()
             data = r.json()
             body = data.get("body", "") or ""
-            # image srcs in the body are root-relative ("/v2/...") - absolutize
-            body = body.replace('src="/', f'src="{self._PATCH_BASE}/').replace("src='/", f"src='{self._PATCH_BASE}/")
+            body = sanitize_patch_html(body, self._PATCH_BASE)
             img = (data.get("image") or {}).get("url") or ""
+            image_url = (self._PATCH_BASE + img) if img.startswith("/") else img
+            if image_url and not is_https_host(image_url, {"launchercontent.mojang.com"}):
+                image_url = ""
             return {
                 "body": body,
                 "title": data.get("title"),
                 "version": data.get("version"),
                 "type": data.get("type"),
                 "date": data.get("date"),
-                "image": (self._PATCH_BASE + img) if img.startswith("/") else img,
+                "image": image_url,
             }
         except Exception as e:
             return {"error": str(e)}

@@ -51,6 +51,7 @@ import requests
 import minecraft_launcher_lib as mll
 
 from .launcher import offline_uuid
+from .security import protect_file_permissions, protect_secret, unprotect_secret
 
 DEVICE_CODE_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode"
 DEVICE_TOKEN_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
@@ -117,7 +118,23 @@ class AccountStore:
             try:
                 with open(self.path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                self.accounts = [Account(**a) for a in data.get("accounts", [])]
+                self.accounts = []
+                secrets_need_migration = False
+                for raw in data.get("accounts", []):
+                    item = dict(raw)
+                    if item.get("access_token") and not str(item.get("access_token")).startswith("dpapi:"):
+                        secrets_need_migration = True
+                    if item.get("refresh_token") and not str(item.get("refresh_token")).startswith("dpapi:"):
+                        secrets_need_migration = True
+                    try:
+                        item["access_token"] = unprotect_secret(item.get("access_token", ""))
+                        item["refresh_token"] = unprotect_secret(item.get("refresh_token", ""))
+                    except Exception:
+                        # Do not silently turn an unreadable encrypted account
+                        # into a logged-out account; surface it as unavailable.
+                        item["access_token"] = ""
+                        item["refresh_token"] = ""
+                    self.accounts.append(Account(**item))
                 self.active_index = data.get("active_index", -1)
                 # migrate accounts saved before UUIDs were dash-formatted (the cause
                 # of skins/capes not loading in game despite a successful sign-in)
@@ -128,7 +145,7 @@ class AccountStore:
                         if fixed != acc.uuid:
                             acc.uuid = fixed
                             changed = True
-                if changed:
+                if changed or secrets_need_migration:
                     self.save()
             except Exception:
                 self.accounts = []
@@ -136,11 +153,20 @@ class AccountStore:
     def save(self):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         data = {
-            "accounts": [a.to_dict() for a in self.accounts],
+            "accounts": [],
             "active_index": self.active_index,
         }
-        with open(self.path, "w", encoding="utf-8") as f:
+        for account in self.accounts:
+            item = account.to_dict()
+            item["access_token"] = protect_secret(item.get("access_token", ""))
+            item["refresh_token"] = protect_secret(item.get("refresh_token", ""))
+            data["accounts"].append(item)
+
+        tmp_path = self.path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+        os.replace(tmp_path, self.path)
+        protect_file_permissions(self.path)
 
     def add_offline(self, username: str) -> Account:
         acc = Account(kind="offline", username=username, uuid=offline_uuid(username))

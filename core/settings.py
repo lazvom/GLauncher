@@ -8,6 +8,13 @@ import os
 # be an app you registered yourself, never someone else's.
 DEFAULT_AZURE_CLIENT_ID = "253275a3-8bab-44c0-a095-e740b065f2c6"
 
+# Kept in one place and validated against on load/save so a corrupted or
+# hand-edited settings.json can't smuggle an arbitrary string into the page's
+# data-theme attribute (see api.set_theme). The web/style.css side must define
+# a matching [data-theme="..."] block for each id here.
+THEMES = ("aurora", "nebula", "emerald", "crimson", "mono")
+DEFAULT_THEME = "aurora"
+
 
 class Settings:
     """The launcher's local config file (settings.json in the data directory).
@@ -27,6 +34,12 @@ class Settings:
         self.launch_arguments = ""
         self.azure_client_id = DEFAULT_AZURE_CLIENT_ID
         self.console_minimized = False
+        self.theme = DEFAULT_THEME
+        # Only a brand-new data directory (no settings.json yet at all) counts
+        # as a first run - an existing settings.json with no "onboarded" key
+        # means someone updated from a version that predates this feature,
+        # not a new player, so they shouldn't see the intro screen either.
+        self.onboarded = os.path.exists(self.path)
         self._load()
 
     def _load(self):
@@ -39,6 +52,9 @@ class Settings:
                 self.java_path = d.get("java_path", self.java_path)
                 self.launch_arguments = d.get("launch_arguments", self.launch_arguments)
                 self.console_minimized = d.get("console_minimized", self.console_minimized)
+                theme = d.get("theme", self.theme)
+                self.theme = theme if theme in THEMES else DEFAULT_THEME
+                self.onboarded = bool(d.get("onboarded", self.onboarded))
             except Exception:
                 pass
 
@@ -52,6 +68,8 @@ class Settings:
                     "java_path": self.java_path,
                     "launch_arguments": self.launch_arguments,
                     "console_minimized": self.console_minimized,
+                    "theme": self.theme,
+                    "onboarded": self.onboarded,
                 },
                 f, indent=2,
             )

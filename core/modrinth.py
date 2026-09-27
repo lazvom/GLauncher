@@ -11,6 +11,8 @@ import os
 import time
 from typing import Optional
 
+from .security import ensure_within_directory, is_https_host, safe_filename
+
 import requests
 
 API_BASE = "https://api.modrinth.com/v2"
@@ -103,26 +105,43 @@ def filter_compatible_versions(
 
 
 def download_file(url: str, dest_path: str, progress_cb=None) -> str:
-    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-    with requests.get(url, headers=_headers(), stream=True, timeout=60) as r:
-        r.raise_for_status()
-        total = int(r.headers.get("content-length", 0))
-        written = 0
-        last_report = 0.0
-        with open(dest_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=1 << 16):
-                if not chunk:
-                    continue
-                f.write(chunk)
-                written += len(chunk)
-                if progress_cb and total:
-                    now = time.monotonic()
-                    # Report at most ~10x/second - a 300MB file at 64KB/chunk is thousands
-                    # of chunks; firing a UI update for every single one floods the queue
-                    # and makes the whole app stutter instead of just showing smooth progress.
-                    if now - last_report >= 0.1 or written >= total:
-                        progress_cb(written, total)
-                        last_report = now
+    # Version metadata ultimately crosses the JS bridge, so do not trust either
+    # the URL or destination just because the UI normally supplies them from
+    # Modrinth. Only the official Modrinth CDN is accepted.
+    if not is_https_host(url, {"cdn.modrinth.com"}):
+        raise ValueError("Refusing to download content from an untrusted host.")
+
+    parent = os.path.dirname(dest_path) or "."
+    ensure_within_directory(parent, dest_path)
+    os.makedirs(parent, exist_ok=True)
+
+    tmp_path = dest_path + ".part"
+    try:
+        with requests.get(url, headers=_headers(), stream=True, timeout=60, allow_redirects=True) as r:
+            r.raise_for_status()
+            if not is_https_host(r.url, {"cdn.modrinth.com"}):
+                raise ValueError("Modrinth redirected the download to an untrusted host.")
+            total = int(r.headers.get("content-length", 0))
+            written = 0
+            last_report = 0.0
+            with open(tmp_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1 << 16):
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    written += len(chunk)
+                    if progress_cb and total:
+                        now = time.monotonic()
+                        if now - last_report >= 0.1 or written >= total:
+                            progress_cb(written, total)
+                            last_report = now
+        os.replace(tmp_path, dest_path)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
     return dest_path
 
 
@@ -140,14 +159,16 @@ def install_content(
     if primary is None:
         raise ValueError("This version has no downloadable files.")
 
-    filename = primary["filename"]
-    url = primary["url"]
+    filename = safe_filename(primary.get("filename", ""))
+    url = str(primary.get("url", ""))
 
     if project_type == "modpack":
-        dest = os.path.join(instance_dir, ".modrinth_cache", filename)
+        dest_root = os.path.join(instance_dir, ".modrinth_cache")
     else:
         subfolder = FOLDER_FOR_TYPE.get(project_type, "mods")
-        dest = os.path.join(instance_dir, subfolder, filename)
+        dest_root = os.path.join(instance_dir, subfolder)
+    dest = os.path.join(dest_root, filename)
+    ensure_within_directory(dest_root, dest)
 
     return download_file(url, dest, progress_cb=progress_cb)
 

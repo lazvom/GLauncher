@@ -32,6 +32,8 @@ import uuid as uuidlib
 from dataclasses import dataclass, asdict, field
 from typing import Optional
 
+from .security import validate_instance_id
+
 
 def _launcher_root() -> str:
     """Folder the launcher itself lives in: the folder containing the
@@ -65,7 +67,8 @@ def _migrate_legacy_home_dir(base_dir: str) -> None:
 
 
 def _slugify(name: str) -> str:
-    slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", name.strip()).strip("-").lower()
+    slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(name).strip()).strip("-").lower()
+    slug = slug[:64].rstrip("-_")
     return slug or "instance"
 
 
@@ -113,7 +116,8 @@ class InstanceManager:
 
     # ---------------------------------------------------------------- utils
     def instance_dir(self, instance_id: str) -> str:
-        return os.path.join(self.instances_dir, instance_id)
+        safe_id = validate_instance_id(instance_id)
+        return os.path.join(self.instances_dir, safe_id)
 
     def _meta_path(self, instance_id: str) -> str:
         return os.path.join(self.instance_dir(instance_id), "instance.json")
@@ -123,7 +127,10 @@ class InstanceManager:
         if not os.path.isdir(self.instances_dir):
             return
         for entry in sorted(os.listdir(self.instances_dir)):
-            meta_path = os.path.join(self.instances_dir, entry, "instance.json")
+            try:
+                meta_path = self._meta_path(entry)
+            except ValueError:
+                continue
             if os.path.exists(meta_path):
                 try:
                     with open(meta_path, "r", encoding="utf-8") as f:
@@ -134,6 +141,7 @@ class InstanceManager:
 
     def save(self, inst: Instance):
         d = self.instance_dir(inst.id)
+        validate_instance_id(inst.id)
         os.makedirs(d, exist_ok=True)
         for sub in ("mods", "resourcepacks", "shaderpacks", "saves", "config"):
             os.makedirs(os.path.join(d, sub), exist_ok=True)

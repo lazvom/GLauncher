@@ -38,6 +38,7 @@ const ICONS = {
   winRestore: '<path d="M8 3h9a2 2 0 0 1 2 2v9"/><rect x="3" y="8" width="12" height="12" rx="1.5"/>',
   folder: '<path d="M4 5h5l2 2h9v11H4z"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
+  sparkles: '<path d="M12 4l1.8 5.2L19 11l-5.2 1.8L12 18l-1.8-5.2L5 11l5.2-1.8z"/>',
   cube: '<path d="M21 8 12 3 3 8v8l9 5 9-5V8z"/><path d="m3 8 9 5 9-5"/>',
   user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
   sparkle: '<path d="M12 3l1.8 4.6L18 9l-4.2 1.4L12 15l-1.8-4.6L6 9l4.2-1.4z"/>',
@@ -62,6 +63,102 @@ async function api(method, ...args) {
     console.error(`api.${method} failed:`, e);
     return { error: String(e) };
   }
+}
+
+/* ========================================================================
+   Theme
+   ======================================================================== */
+// Swatch colors here are display-only (for the picker in Settings) and are
+// kept in sync by hand with each [data-theme] block in style.css - the id
+// on the left is what's actually sent to Python / written to data-theme.
+const THEMES = [
+  { id: "aurora", label: "Aurora", swatch: ["#ff90c6", "#7c9cff"] },
+  { id: "nebula", label: "Nebula", swatch: ["#b98bff", "#7ce0ff"] },
+  { id: "emerald", label: "Emerald", swatch: ["#b6e85a", "#57d9a3"] },
+  { id: "crimson", label: "Crimson", swatch: ["#ff6b6b", "#ff9a5a"] },
+  { id: "mono", label: "Mono", swatch: ["#8f98b3", "#b9c2d6"] },
+];
+const THEME_CACHE_KEY = "glauncher-theme";
+
+function applyThemeLocally(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  try {
+    localStorage.setItem(THEME_CACHE_KEY, theme);
+  } catch (e) { /* localStorage unavailable - theme still applies for this session */ }
+}
+
+async function initTheme() {
+  const result = await api("get_theme");
+  if (result?.theme) applyThemeLocally(result.theme);
+  return result || { theme: document.documentElement.getAttribute("data-theme") || "aurora", themes: THEMES.map((t) => t.id), onboarded: true };
+}
+
+async function setTheme(theme) {
+  applyThemeLocally(theme); // instant - don't wait on the round-trip to Python
+  const result = await api("set_theme", theme);
+  if (result?.error) toast(result.error);
+  return result;
+}
+
+/* ---- First-run intro: welcome + pick a theme, shown once ---- */
+function runOnboarding(startingTheme) {
+  return new Promise((resolve) => {
+    const root = document.getElementById("onboarding-root");
+    let current = startingTheme || "aurora";
+    applyThemeLocally(current);
+
+    const swatchEls = new Map();
+    const setActive = (theme) => {
+      for (const [id, node] of swatchEls) node.classList.toggle("active", id === theme);
+    };
+
+    const grid = el(
+      "div",
+      { class: "theme-grid" },
+      THEMES.map((t) => {
+        const node = el(
+          "button",
+          {
+            class: `theme-swatch${t.id === current ? " active" : ""}`,
+            type: "button",
+            title: t.label,
+            "data-testid": `onboarding-theme-${t.id}`,
+            onclick: () => {
+              if (t.id === current) return;
+              current = t.id;
+              setActive(current);
+              applyThemeLocally(current); // live preview - not persisted until Get Started
+            },
+          },
+          [el("span", { class: "theme-swatch-dot" }), el("span", { class: "theme-swatch-label" }, t.label)]
+        );
+        node.style.setProperty("--swatch-a", t.swatch[0]);
+        node.style.setProperty("--swatch-b", t.swatch[1]);
+        swatchEls.set(t.id, node);
+        return node;
+      })
+    );
+
+    const finish = async () => {
+      root.classList.remove("visible");
+      const result = await api("complete_onboarding", current);
+      if (result?.error) toast(result.error); // theme still applied locally either way
+      setTimeout(() => { root.replaceChildren(); resolve(); }, 350); // let the fade-out finish first
+    };
+
+    const startBtn = el("button", { class: "btn btn-primary", "data-testid": "onboarding-start-btn", onclick: finish }, "Get Started");
+
+    root.replaceChildren(
+      el("div", { class: "onboarding-card" }, [
+        el("div", { class: "onboarding-badge" }, [icon("sparkles")]),
+        el("h1", {}, "Welcome to GLauncher"),
+        el("p", {}, "A launcher built for user experience. Take a look at our themes - you can always change it later in Settings."),
+        grid,
+        startBtn,
+      ])
+    );
+    requestAnimationFrame(() => root.classList.add("visible"));
+  });
 }
 
 function fmtDownloads(n) {
@@ -606,6 +703,50 @@ function renderHome(entries) {
   homePage.replaceChildren(hero, el("div", { class: "section-title" }, [icon("sparkle"), "Recent updates"]), grid);
 }
 
+function setSafePatchHtml(container, html) {
+  const allowed = new Set([
+    "P", "DIV", "SPAN", "STRONG", "B", "EM", "I", "U", "S", "DEL",
+    "UL", "OL", "LI", "BR", "HR", "H1", "H2", "H3", "H4", "H5", "H6",
+    "BLOCKQUOTE", "CODE", "PRE", "TABLE", "THEAD", "TBODY", "TFOOT",
+    "TR", "TH", "TD", "IMG",
+  ]);
+  const source = new DOMParser().parseFromString(String(html), "text/html");
+  const out = document.createDocumentFragment();
+  const visit = (node, parent) => {
+    for (const child of node.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        parent.append(document.createTextNode(child.nodeValue || ""));
+        continue;
+      }
+      if (child.nodeType !== Node.ELEMENT_NODE) continue;
+      const tag = child.tagName.toUpperCase();
+      if (!allowed.has(tag)) {
+        visit(child, parent);
+        continue;
+      }
+      const clean = document.createElement(tag.toLowerCase());
+      if (tag === "IMG") {
+        const src = child.getAttribute("src") || "";
+        try {
+          const u = new URL(src, "https://launchercontent.mojang.com/");
+          if (u.protocol === "https:" && u.hostname === "launchercontent.mojang.com") {
+            clean.src = u.href;
+            clean.loading = "lazy";
+            clean.referrerPolicy = "no-referrer";
+            clean.alt = "";
+            parent.append(clean);
+          }
+        } catch {}
+        continue;
+      }
+      parent.append(clean);
+      visit(child, clean);
+    }
+  };
+  visit(source.body, out);
+  container.replaceChildren(out);
+}
+
 function openPatchNote(entry) {
   sheet.open(({ header, body }) => {
     header.append(
@@ -619,7 +760,7 @@ function openPatchNote(entry) {
     body.append(bodyEl);
     api("get_patch_note_body", entry.contentPath).then((res) => {
       if (res?.error || !res?.body) { bodyEl.replaceChildren(el("div", { class: "empty-state" }, "Couldn't load the full notes.")); return; }
-      bodyEl.innerHTML = res.body;
+      setSafePatchHtml(bodyEl, res.body || "");
     });
   });
 }
@@ -1385,29 +1526,26 @@ function startAddMicrosoftFlow() {
    SKINS
    ======================================================================== */
 const skinsPage = document.getElementById("page-skins");
-let _skinview3dModulePromise = null;
-function loadSkinview3d() {
-  if (!_skinview3dModulePromise) _skinview3dModulePromise = import("https://cdn.jsdelivr.net/npm/skinview3d@3.4.2/+esm");
-  return _skinview3dModulePromise;
+async function create3DSkinPreview(container, skinUrl, capeUrl) {
+  // Security: do not execute JavaScript fetched from a third-party CDN inside
+  // the privileged pywebview page. A remote-script compromise would otherwise
+  // inherit access to window.pywebview.api. The preview remains useful as a
+  // normal image and all skin/cape management features continue to work.
+  container.replaceChildren();
+  if (!skinUrl) {
+    container.append("No skin");
+    return;
+  }
+  const preview = el("img", {
+    src: skinUrl,
+    alt: "Minecraft skin preview",
+    loading: "lazy",
+    draggable: "false",
+  });
+  if (capeUrl) preview.dataset.capeUrl = capeUrl;
+  container.append(preview);
 }
 let _activeSkinViewer = null;
-async function create3DSkinPreview(container, skinUrl, capeUrl) {
-  if (_activeSkinViewer) { try { _activeSkinViewer.dispose?.(); } catch {} _activeSkinViewer = null; }
-  container.replaceChildren();
-  if (!skinUrl) { container.append("No skin"); return; }
-  const canvas = el("canvas");
-  container.append(canvas);
-  try {
-    const skinview3d = await loadSkinview3d();
-    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const viewer = new skinview3d.SkinViewer({ canvas, width: 190, height: 250, skin: skinUrl });
-    if (capeUrl) viewer.loadCape(capeUrl);
-    viewer.fov = 50; viewer.zoom = 0.9; viewer.autoRotate = !reducedMotion; viewer.autoRotateSpeed = 0.8;
-    _activeSkinViewer = viewer;
-  } catch (e) {
-    container.replaceChildren(el("img", { src: skinUrl, alt: "" }));
-  }
-}
 async function loadSkins() {
   skinsPage.replaceChildren(
     el("div", { class: "page-head" }, el("div", {}, [el("h1", {}, "Skins"), el("p", {}, "Preview, upload and equip skins & capes")])),
@@ -1506,12 +1644,58 @@ async function openSettingsSheet() {
       el("div", { class: "field-label" }, "Custom Java executable (optional)"), javaInput,
       el("div", { class: "field-label" }, "Launch Arguments (optional)"), argsInput,
       el("div", { class: "text-small", style: { marginTop: "4px" } }, "Extra JVM arguments applied to every instance you launch."),
+      appearanceSection(s),
       updateSection(s)
     );
     const saveBtn = el("button", { class: "btn btn-primary", "data-testid": "settings-save-btn" }, "Save settings");
     footer.append(el("button", { class: "btn btn-ghost", onclick: close }, "Cancel"), saveBtn);
     saveBtn.addEventListener("click", async () => { await api("save_settings", ramMin.value, ramMax.value, javaInput.value.trim(), argsInput.value.trim()); toast("Settings saved.", "success"); close(); });
   });
+}
+
+/* ---- Appearance card inside the Settings sheet - picks the color theme ---- */
+function appearanceSection(s) {
+  let current = s.theme || "aurora";
+  const swatchEls = new Map();
+
+  const setActive = (theme) => {
+    for (const [id, node] of swatchEls) node.classList.toggle("active", id === theme);
+  };
+
+  const grid = el(
+    "div",
+    { class: "theme-grid" },
+    THEMES.map((t) => {
+      const node = el(
+        "button",
+        {
+          class: `theme-swatch${t.id === current ? " active" : ""}`,
+          type: "button",
+          title: t.label,
+          "data-testid": `theme-swatch-${t.id}`,
+          onclick: async () => {
+            if (t.id === current) return;
+            current = t.id;
+            setActive(current);
+            await setTheme(t.id);
+          },
+        },
+        [el("span", { class: "theme-swatch-dot" }), el("span", { class: "theme-swatch-label" }, t.label)]
+      );
+      // Custom properties aren't reliably settable through a plain style
+      // object (see el()'s Object.assign path), so set them explicitly.
+      node.style.setProperty("--swatch-a", t.swatch[0]);
+      node.style.setProperty("--swatch-b", t.swatch[1]);
+      swatchEls.set(t.id, node);
+      return node;
+    })
+  );
+
+  return el("div", { class: "card", style: { marginTop: "16px" } }, [
+    el("h2", {}, "Appearance"),
+    el("div", { class: "text-small", style: { margin: "2px 0 12px" } }, "Applies immediately."),
+    grid,
+  ]);
 }
 
 /* ---- Version / update card inside the Settings sheet ---- */
@@ -1540,8 +1724,10 @@ function updateSection(s) {
     actionBtn.textContent = "Checking...";
     const result = await api("check_for_updates");
     actionBtn.disabled = false;
+    if (result?.current) versionLabel.textContent = result.current; // may have just been recorded for the first time
     if (result?.error) { toast(`Couldn't check for updates: ${result.error}`); setAction("Check for Updates", "btn-ghost", runCheck); return; }
-    if (result.frozen || result.no_releases) { setAction("Check for Updates", "btn-ghost", runCheck); return; }
+    if (result.frozen) { toast("This build doesn't support in-app update checks."); setAction("Check for Updates", "btn-ghost", runCheck); return; }
+    if (result.no_releases) { toast("No published releases found yet."); setAction("Check for Updates", "btn-ghost", runCheck); return; }
     if (result.update_available) {
       latestInfo = result;
       setAction(`Update to ${result.latest}`, "btn-primary", runUpdate);
@@ -1674,7 +1860,10 @@ pageLoaders.manage = loadManage;
 pageLoaders.skins = loadSkins;
 
 (async function boot() {
-  await Promise.all([refreshInstances(), loadAccounts()]);
+  const loadPromise = Promise.all([refreshInstances(), loadAccounts()]);
+  const themeInfo = await initTheme(); // reconciles the pre-paint localStorage guess against Python's saved value
+  if (!themeInfo.onboarded) await runOnboarding(themeInfo.theme);
+  await loadPromise;
   const initial = new URLSearchParams(location.search).get("tab");
   showPage(["home", "content", "manage", "skins"].includes(initial) ? initial : "home");
   const open = new URLSearchParams(location.search).get("open");

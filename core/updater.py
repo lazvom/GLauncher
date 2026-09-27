@@ -14,9 +14,9 @@ synced into the launcher root except a short exclusion list (see
 EXCLUDED_FROM_SYNC below) - so a release that adds a brand new file or
 folder just installs it, no code change needed here to recognise it. The
 data/ directory (accounts, instances, settings) is always left untouched.
-requirements.txt is also re-installed after syncing, so a release that
-adds a new dependency gets it pulled in automatically too, not just the
-new .py files that import it.
+The updater deliberately does not execute pip after downloading release
+source; dependency changes must be installed by the trusted build/install
+process rather than by network-delivered requirements.txt.
 
 This only takes effect for a source checkout - i.e. `python main.py`
 directly, or `launcher.py` (see that file) spawning main.py as a real,
@@ -31,14 +31,15 @@ import io
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import urllib.request
 import urllib.error
 import zipfile
 from typing import Callable, Optional
+from pathlib import PurePosixPath
 
+from .security import is_https_host
 from .instances import _launcher_root
 
 REPO = "lazvom/GLauncher"
@@ -59,6 +60,9 @@ EXCLUDED_FROM_SYNC = {
     "data", "python-embed", "__pycache__", VERSION_FILENAME,
     ".git", ".github", ".gitignore", ".gitattributes", "LICENSE",
 }
+
+MAX_UPDATE_ARCHIVE_BYTES = 250 * 1024 * 1024
+ALLOWED_ZIP_HOSTS = {"codeload.github.com", "github.com"}
 
 
 def is_frozen() -> bool:
@@ -108,13 +112,23 @@ def get_remote_release() -> Optional[dict]:
     except urllib.error.HTTPError as e:
         if e.code == 404:
             return None
+        if e.code == 403 and e.headers and e.headers.get("X-RateLimit-Remaining") == "0":
+            # GitHub's unauthenticated API limit is 60 requests/hour, shared
+            # by everyone behind the same IP (offices, CGNAT, VPNs...) - easy
+            # to hit without it meaning anything is actually wrong.
+            raise RuntimeError("GitHub API rate limit exceeded for your network - try again later.") from e
         raise
+    zip_url = data["zipball_url"]
+    if not is_https_host(zip_url, ALLOWED_ZIP_HOSTS):
+        raise ValueError("GitHub returned an unexpected update host.")
+    if data.get("draft") or data.get("prerelease"):
+        return None
     return {
         "tag": data["tag_name"],
         "name": data.get("name") or data["tag_name"],
         "body": data.get("body") or "",
         "date": data.get("published_at", ""),
-        "zip_url": data["zipball_url"],
+        "zip_url": zip_url,
     }
 
 
@@ -128,7 +142,7 @@ def check_for_update() -> dict:
         return {"update_available": False, "frozen": True}
     try:
         remote = get_remote_release()
-    except (urllib.error.URLError, TimeoutError, KeyError, ValueError) as e:
+    except (urllib.error.URLError, TimeoutError, KeyError, ValueError, RuntimeError) as e:
         return {"error": str(e)}
 
     if remote is None:
@@ -150,11 +164,36 @@ def check_for_update() -> dict:
     }
 
 
+def _safe_extract_zip(archive_bytes: bytes, destination: str) -> None:
+    """Extract only normal relative files/directories and reject Zip Slip paths."""
+    with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
+        root = os.path.abspath(destination)
+        for info in zf.infolist():
+            name = info.filename.replace("\\", "/")
+            if not name or name.startswith("/"):
+                raise RuntimeError("Unsafe path in update archive.")
+            path = PurePosixPath(name)
+            if any(part in {"", ".", ".."} for part in path.parts):
+                raise RuntimeError("Unsafe path in update archive.")
+            if any(":" in part for part in path.parts):
+                raise RuntimeError("Unsafe drive-qualified path in update archive.")
+            mode = (info.external_attr >> 16) & 0o170000
+            if mode == 0o120000:
+                raise RuntimeError("Symlinks are not allowed in update archives.")
+            target = os.path.abspath(os.path.join(root, *path.parts))
+            if target != root and not target.startswith(root + os.sep):
+                raise RuntimeError("Unsafe path in update archive.")
+            if info.is_dir():
+                os.makedirs(target, exist_ok=True)
+                continue
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with zf.open(info, "r") as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst, length=1 << 16)
+
 def apply_update(update: Callable[[Optional[float], str], None]) -> dict:
     """Downloads the latest release's source zip and syncs it into the
-    launcher root (see EXCLUDED_FROM_SYNC for what's left alone), then
-    installs requirements.txt again so any new dependency the update
-    needs is pulled in too - not just new/changed source files.
+    launcher root (see EXCLUDED_FROM_SYNC for what's left alone). Dependency
+    installation is intentionally not performed by the self-updater.
     `update(progress, detail)` is called as work proceeds, matching the
     TaskManager work_fn convention (progress is 0..1, or None while
     indeterminate). Returns {"tag", "name"} on success; raises on failure
@@ -169,15 +208,22 @@ def apply_update(update: Callable[[Optional[float], str], None]) -> dict:
     update(0, "Downloading update...")
     req = urllib.request.Request(remote["zip_url"], headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=60) as resp:
+        final_url = resp.geturl()
+        if not is_https_host(final_url, ALLOWED_ZIP_HOSTS):
+            raise RuntimeError("GitHub redirected the update to an unexpected host.")
         total = resp.length or 0
+        if total and total > MAX_UPDATE_ARCHIVE_BYTES:
+            raise RuntimeError("Update archive is unexpectedly large.")
         chunks = []
         read = 0
         while True:
             chunk = resp.read(65536)
             if not chunk:
                 break
-            chunks.append(chunk)
             read += len(chunk)
+            if read > MAX_UPDATE_ARCHIVE_BYTES:
+                raise RuntimeError("Update archive exceeds the safety limit.")
+            chunks.append(chunk)
             if total:
                 update(min(0.55, 0.55 * read / total), "Downloading update...")
             else:
@@ -187,8 +233,7 @@ def apply_update(update: Callable[[Optional[float], str], None]) -> dict:
     update(0.6, "Extracting...")
     root = _launcher_root()
     with tempfile.TemporaryDirectory(prefix="glauncher_update_") as tmp:
-        with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
-            zf.extractall(tmp)
+        _safe_extract_zip(archive_bytes, tmp)
 
         # GitHub's release/zipball archives contain one top-level folder,
         # e.g. "lazvom-GLauncher-abc1234".
@@ -206,6 +251,8 @@ def apply_update(update: Callable[[Optional[float], str], None]) -> dict:
                 continue
             src = os.path.join(extracted_root, name)
             dest = os.path.join(root, name)
+            from .security import ensure_within_directory
+            ensure_within_directory(root, dest)
             if os.path.isdir(src):
                 if os.path.exists(dest):
                     shutil.rmtree(dest, ignore_errors=True)
@@ -214,40 +261,11 @@ def apply_update(update: Callable[[Optional[float], str], None]) -> dict:
                 os.makedirs(os.path.dirname(dest) or root, exist_ok=True)
                 shutil.copy2(src, dest)
 
-    _install_requirements(root, update)
-
+    # Do not run pip against files that just arrived over the network.
+    # Dependencies must be installed separately from the trusted build process.
     _set_local_release(remote["tag"], remote["name"])
     update(1.0, "Update installed")
     return {"tag": remote["tag"], "name": remote["name"]}
-
-
-def _install_requirements(root: str, update: Callable[[Optional[float], str], None]) -> None:
-    """Runs `pip install -r requirements.txt` with the *current*
-    interpreter (sys.executable) after syncing files, so a release that
-    adds a new dependency doesn't just get skipped until someone thinks
-    to reinstall it by hand. sys.executable is correct whether that's a
-    system Python (dev/source runs) or python-embed's python.exe (when
-    this process was spawned by the launcher.py stub) - either way it's
-    the interpreter main.py is actually running under right now."""
-    req_file = os.path.join(root, "requirements.txt")
-    if not os.path.isfile(req_file):
-        return
-    update(0.85, "Installing dependencies...")
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-r", req_file, "--no-warn-script-location"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-    except FileNotFoundError as e:
-        raise RuntimeError(f"Couldn't run pip to install dependencies: {e}") from e
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError("Installing dependencies timed out.") from e
-    except subprocess.CalledProcessError as e:
-        detail = (e.stderr or e.stdout or "").strip().splitlines()[-1:] or [str(e)]
-        raise RuntimeError(f"Installing dependencies failed: {detail[0]}") from e
 
 
 def restart_app() -> None:
