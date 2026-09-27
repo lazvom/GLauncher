@@ -24,6 +24,7 @@ class Settings:
         self.ram_min_mb = 1024
         self.ram_max_mb = 4096
         self.java_path = ""
+        self.launch_arguments = ""
         self.azure_client_id = DEFAULT_AZURE_CLIENT_ID
         self.console_minimized = False
         self._load()
@@ -36,6 +37,7 @@ class Settings:
                 self.ram_min_mb = d.get("ram_min_mb", self.ram_min_mb)
                 self.ram_max_mb = d.get("ram_max_mb", self.ram_max_mb)
                 self.java_path = d.get("java_path", self.java_path)
+                self.launch_arguments = d.get("launch_arguments", self.launch_arguments)
                 self.console_minimized = d.get("console_minimized", self.console_minimized)
             except Exception:
                 pass
@@ -48,6 +50,7 @@ class Settings:
                     "ram_min_mb": self.ram_min_mb,
                     "ram_max_mb": self.ram_max_mb,
                     "java_path": self.java_path,
+                    "launch_arguments": self.launch_arguments,
                     "console_minimized": self.console_minimized,
                 },
                 f, indent=2,

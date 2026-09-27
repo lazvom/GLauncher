@@ -70,7 +70,7 @@ window.pywebview = {
       return { hits: pool.slice(offset, offset + 20), total_hits: total };
     },
     async list_installed_content(id) { await delay(120); return { items: INSTALLED[id] || [] }; },
-    async get_settings() { return { ram_min_mb: 2048, ram_max_mb: 6144, java_path: "", base_dir: "~/GlassLauncher", version: "v1.0.0" }; },
+    async get_settings() { return { ram_min_mb: 2048, ram_max_mb: 6144, java_path: "", launch_arguments: "", base_dir: "~/GlassLauncher", version: "v1.0.0" }; },
     async check_for_updates() {
       await delay(300);
       return {

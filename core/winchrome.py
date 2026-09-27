@@ -536,9 +536,19 @@ def minimize(window):
 def start_drag(window):
     """Move only from the explicit custom HTML titlebar strip.
 
-    The move is implemented with SetWindowPos tracking rather than pywebview's
-    Window.move(), so the WebView never turns normal client-area clicks into a drag.
-    """
+    An earlier version of this tried posting a native WM_NCLBUTTONDOWN
+    (HTCAPTION) message to get real Aero Snap / Windows 11 Snap Layouts,
+    the way Chromium and Electron's `-webkit-app-region: drag` do. That
+    broke dragging entirely instead: WebView2 runs its own browser process
+    and holds real OS mouse capture on its own child window for the
+    duration of the mousedown, and that capture belongs to WebView2's
+    thread/process, not ours - our ReleaseCapture() call can only release
+    capture our own thread set, so it's a no-op here, and the posted
+    message never gets real mouse-move input to act on. That's exactly why
+    the move is implemented with SetWindowPos tracking instead, below: it
+    isn't a real OS move loop, so Snap doesn't come for free with it, but
+    it's what actually works with a WebView2 child owning input the way it
+    does."""
     return _start_mouse_operation(window, 'move')
 
 

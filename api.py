@@ -28,7 +28,7 @@ from core import launcher as mc
 from core import modrinth as mr
 from core import skins as sk
 from core import winchrome
-from core.auth import AccountStore, MicrosoftDeviceCodeFlow
+from core.auth import AccountStore, MicrosoftDeviceCodeFlow, MicrosoftAuthCodeFlow
 from core.instances import InstanceManager
 from core.settings import Settings
 from core.tasks import TaskManager
@@ -70,7 +70,9 @@ class Api:
         self.accounts = AccountStore(os.path.join(self.im.base_dir, "accounts.json"))
         self.settings = Settings(self.im.base_dir)
         self.tasks = TaskManager()
-        self._ms_flow: MicrosoftDeviceCodeFlow | None = None
+        self._ms_flow: MicrosoftDeviceCodeFlow | MicrosoftAuthCodeFlow | None = None
+        self._ms_last_device_data: dict | None = None
+        self._ms_authcode_url: str | None = None
         self._window = None  # set by main.py right after the window is created
 
         threading.Thread(target=self._dispatch_loop, daemon=True).start()
@@ -247,13 +249,20 @@ class Api:
 
             update(None, "Starting Minecraft...")
             self._sync_shared_files_in(self.im.instance_dir(inst.id))
+            # Global "Launch Arguments" from Settings apply to every
+            # instance; an instance's own jvm_args (set via editing its
+            # data, if it has any) is appended after, so it can add to or
+            # override a global flag for that one instance specifically.
+            extra_args = (self.settings.launch_arguments or "").split()
+            if inst.jvm_args:
+                extra_args += inst.jvm_args.split()
             options = mc.build_options(
                 username=account.username,
                 uuid_=account.uuid,
                 token=account.access_token,
                 ram_min_mb=self.settings.ram_min_mb,
                 ram_max_mb=self.settings.ram_max_mb,
-                extra_jvm_args=inst.jvm_args.split() if inst.jvm_args else None,
+                extra_jvm_args=extra_args or None,
                 game_directory=self.im.instance_dir(inst.id),
             )
             proc = mc.launch(installed_id, self.im.shared_dir, options)
@@ -521,20 +530,79 @@ class Api:
     def get_azure_client_id(self):
         return self.settings.azure_client_id or ""
 
-    def ms_request_code(self, client_id):
+    def ms_start_login(self, client_id):
+        """Starts sign-in with the no-code-to-type flow (MicrosoftAuthCodeFlow)
+        by default. Falls back to the device-code flow automatically if the
+        local listener can't be started - most commonly because a previous
+        sign-in attempt was abandoned (sheet closed without finishing) and
+        its listener is still bound to the port; rather than surface a
+        confusing "port in use" error, the flow that needs no port at all
+        just takes over instead."""
+        self._ms_cancel_active()
+        self._ms_flow = MicrosoftAuthCodeFlow(client_id)
+        try:
+            url = self._ms_flow.start()
+        except OSError:
+            return self._ms_start_device_code(client_id)
+        self._ms_authcode_url = url
+        self._ms_flow.open_browser(url)
+        return {"flow": "authcode"}
+
+    def ms_use_device_code_instead(self, client_id):
+        """Explicit "Use a code instead" fallback - for when the browser
+        never seems to come back (a firewall/AV blocking the local
+        listener, a locked-down network, or the redirect URI just hasn't
+        been added to the Azure app yet)."""
+        self._ms_cancel_active()
+        return self._ms_start_device_code(client_id)
+
+    def _ms_start_device_code(self, client_id):
         self._ms_flow = MicrosoftDeviceCodeFlow(client_id)
         try:
             data = self._ms_flow.request_code()
-            self._ms_flow.open_browser(data.get("verification_uri", "https://microsoft.com/link"))
-            return data
+            self._ms_last_device_data = data
+            self._ms_flow.open_browser(data.get("verification_uri", "https://microsoft.com/link"), data.get("user_code", ""))
+            return {"flow": "devicecode", **data}
         except Exception as e:
             return {"error": str(e)}
+
+    def _ms_cancel_active(self):
+        if self._ms_flow:
+            try:
+                self._ms_flow.cancel()
+            except Exception:
+                pass
+
+    def ms_cancel(self):
+        self._ms_cancel_active()
+        return {}
+
+    def ms_reopen_browser(self):
+        """Re-opens the sign-in page for whichever flow is in progress -
+        for when a popup blocker ate it, or the person closed the tab by
+        accident and doesn't want to cancel and start over."""
+        if not self._ms_flow:
+            return {"error": "No sign-in in progress."}
+        if isinstance(self._ms_flow, MicrosoftAuthCodeFlow):
+            if not self._ms_authcode_url:
+                return {"error": "No sign-in in progress."}
+            self._ms_flow.open_browser(self._ms_authcode_url)
+            return {}
+        data = getattr(self, "_ms_last_device_data", None)
+        if not data:
+            return {"error": "No sign-in in progress."}
+        self._ms_flow.open_browser(data.get("verification_uri", "https://microsoft.com/link"), data.get("user_code", ""))
+        return {}
 
     def ms_wait_and_complete(self, expires_in=900):
         if not self._ms_flow:
             return {"error": "No sign-in in progress."}
         try:
-            token_data = self._ms_flow.poll_for_token(expires_in=expires_in)
+            if isinstance(self._ms_flow, MicrosoftAuthCodeFlow):
+                code = self._ms_flow.wait_for_code(timeout=expires_in)
+                token_data = self._ms_flow.exchange_code(code)
+            else:
+                token_data = self._ms_flow.poll_for_token(expires_in=expires_in)
             login_data = self._ms_flow.complete(token_data)
             self.accounts.add_microsoft(login_data)
             return {"accounts": self.list_accounts()}
@@ -644,14 +712,16 @@ class Api:
             "ram_min_mb": self.settings.ram_min_mb,
             "ram_max_mb": self.settings.ram_max_mb,
             "java_path": self.settings.java_path,
+            "launch_arguments": self.settings.launch_arguments,
             "base_dir": self.im.base_dir,
             "version": (updater.get_local_release() or {}).get("name"),
         }
 
-    def save_settings(self, ram_min_mb, ram_max_mb, java_path):
+    def save_settings(self, ram_min_mb, ram_max_mb, java_path, launch_arguments=""):
         self.settings.ram_min_mb = int(ram_min_mb)
         self.settings.ram_max_mb = int(ram_max_mb)
         self.settings.java_path = java_path or ""
+        self.settings.launch_arguments = launch_arguments or ""
         self.settings.save()
         return self.get_settings()
 

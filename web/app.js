@@ -1327,24 +1327,56 @@ function startAddMicrosoftFlow() {
     }
     const statusEl = el("div", { class: "text-small" });
     body.append(statusEl);
-    const startBtn = el("button", { class: "btn btn-primary" }, "Get sign-in code");
-    footer.append(el("button", { class: "btn btn-ghost", onclick: close }, "Cancel"), startBtn);
-    startBtn.addEventListener("click", async () => {
-      startBtn.disabled = true;
-      statusEl.textContent = "Requesting a sign-in code…";
-      const data = await api("ms_request_code", clientId);
-      if (data?.error) { statusEl.textContent = ""; toast(data.error); startBtn.disabled = false; return; }
+    const startBtn = el("button", { class: "btn btn-primary" }, "Sign in with Microsoft");
+    footer.append(el("button", { class: "btn btn-ghost", onclick: () => { api("ms_cancel"); close(); } }, "Cancel"), startBtn);
+
+    const waitForResult = async (expiresIn) => {
+      const result = await api("ms_wait_and_complete", expiresIn || 900);
+      if (result?.error) { toast(result.error); close(); return; }
+      close();
+      loadAccounts();
+    };
+
+    const showDeviceCode = (data) => {
       body.replaceChildren(
         el("div", { class: "text-small" }, "Enter this code"),
         el("div", { style: { fontSize: "34px", fontWeight: "800", color: "var(--sakura-bright)", margin: "4px 0" } }, data.user_code),
         el("div", { class: "text-small", style: { color: "var(--blue-bright)", marginBottom: "16px" } }, `at ${data.verification_uri}`),
-        el("div", { class: "text-small" }, "Waiting for you to enter the code…")
+        el("div", { class: "text-small" }, "We've opened that page for you - just type in the code and sign in."),
+        el("div", { class: "text-small" }, "Waiting for you to finish…")
       );
-      footer.replaceChildren();
-      const result = await api("ms_wait_and_complete", data.expires_in || 900);
-      if (result?.error) { toast(result.error); close(); return; }
-      close();
-      loadAccounts();
+      const reopenBtn = el("button", { class: "btn btn-ghost" }, "Reopen browser");
+      reopenBtn.addEventListener("click", () => api("ms_reopen_browser"));
+      footer.replaceChildren(reopenBtn);
+      waitForResult(data.expires_in);
+    };
+
+    const showAuthCodeWaiting = () => {
+      body.replaceChildren(
+        el("div", { class: "text-small" }, "We've opened your browser to sign in."),
+        el("div", { class: "text-small" }, "Once you're signed in, this closes on its own - nothing to copy or type."),
+        el("div", { class: "text-small" }, "Waiting for you to finish…")
+      );
+      const reopenBtn = el("button", { class: "btn btn-ghost" }, "Reopen browser");
+      reopenBtn.addEventListener("click", () => api("ms_reopen_browser"));
+      const fallbackBtn = el("button", { class: "btn btn-ghost" }, "Use a code instead");
+      fallbackBtn.addEventListener("click", async () => {
+        const data = await api("ms_use_device_code_instead", clientId);
+        if (data?.error) { toast(data.error); return; }
+        showDeviceCode(data);
+      });
+      footer.replaceChildren(reopenBtn, fallbackBtn);
+      waitForResult(900);
+    };
+
+    startBtn.addEventListener("click", async () => {
+      startBtn.disabled = true;
+      statusEl.textContent = "Starting sign-in…";
+      const data = await api("ms_start_login", clientId);
+      statusEl.textContent = "";
+      if (data?.error) { toast(data.error); startBtn.disabled = false; return; }
+      if (data.flow === "devicecode") showDeviceCode(data);
+      else showAuthCodeWaiting();
     });
   });
 }
@@ -1464,6 +1496,7 @@ async function openSettingsSheet() {
     const ramMinLabel = el("span", {}, String(s.ram_min_mb));
     const ramMaxLabel = el("span", {}, String(s.ram_max_mb));
     const javaInput = el("input", { type: "text", value: s.java_path || "", placeholder: "Leave blank to auto-detect" });
+    const argsInput = el("input", { type: "text", value: s.launch_arguments || "", placeholder: "e.g. -XX:+UseG1GC -Dfile.encoding=UTF-8" });
     ramMin.addEventListener("input", () => (ramMinLabel.textContent = ramMin.value));
     ramMax.addEventListener("input", () => (ramMaxLabel.textContent = ramMax.value));
     body.append(
@@ -1471,11 +1504,13 @@ async function openSettingsSheet() {
       el("div", { class: "field-label", style: { marginTop: "0" } }, [document.createTextNode("Min RAM: "), ramMinLabel, document.createTextNode(" MB")]), ramMin,
       el("div", { class: "field-label" }, [document.createTextNode("Max RAM: "), ramMaxLabel, document.createTextNode(" MB")]), ramMax,
       el("div", { class: "field-label" }, "Custom Java executable (optional)"), javaInput,
+      el("div", { class: "field-label" }, "Launch Arguments (optional)"), argsInput,
+      el("div", { class: "text-small", style: { marginTop: "4px" } }, "Extra JVM arguments applied to every instance you launch."),
       updateSection(s)
     );
     const saveBtn = el("button", { class: "btn btn-primary", "data-testid": "settings-save-btn" }, "Save settings");
     footer.append(el("button", { class: "btn btn-ghost", onclick: close }, "Cancel"), saveBtn);
-    saveBtn.addEventListener("click", async () => { await api("save_settings", ramMin.value, ramMax.value, javaInput.value.trim()); toast("Settings saved.", "success"); close(); });
+    saveBtn.addEventListener("click", async () => { await api("save_settings", ramMin.value, ramMax.value, javaInput.value.trim(), argsInput.value.trim()); toast("Settings saved.", "success"); close(); });
   });
 }
 
